@@ -1,37 +1,58 @@
 import { useSyncExternalStore } from "react";
+import { applyAction, DEFAULT_STATE, isBoardState, type BoardAction } from "./board-ops";
 import type { BoardState, Status, Task } from "./types";
 
-const STORAGE_KEY = "kanban-board-v1";
+// El tablero vive en el servidor (data/board.json). Aquí guardamos una copia local,
+// aplicamos los cambios de forma optimista y consultamos periódicamente para ver
+// los cambios hechos desde fuera (por ejemplo, desde el servidor MCP).
+const API = "/api/board";
+const POLL_MS = 2000;
+const LEGACY_STORAGE_KEY = "kanban-board-v1";
 
-const DEFAULT_STATE: BoardState = {
-  statuses: [
-    { id: "todo", name: "Por hacer", color: "#64748b" },
-    { id: "doing", name: "En progreso", color: "#3b82f6" },
-    { id: "done", name: "Hecho", color: "#10b981" },
-  ],
-  tasks: [],
-};
-
-let state: BoardState | null = null;
+let state: BoardState = DEFAULT_STATE;
+let pending = 0;
+let started = false;
 const listeners = new Set<() => void>();
 
-function load(): BoardState {
+function setState(next: BoardState) {
+  state = next;
+  listeners.forEach((l) => l());
+}
+
+async function fetchBoard() {
+  if (pending > 0) return; // no pisamos cambios locales que aún no confirmó el servidor
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as BoardState;
-      if (Array.isArray(parsed.statuses) && Array.isArray(parsed.tasks)) {
-        return parsed;
-      }
-    }
+    const res = await fetch(API, { cache: "no-store" });
+    const board: unknown = await res.json();
+    if (pending === 0 && isBoardState(board)) setState(board);
   } catch {
-    // almacenamiento no disponible o datos corruptos: usamos el estado por defecto
+    // servidor no disponible: lo intentaremos en la siguiente consulta
   }
-  return DEFAULT_STATE;
+}
+
+/** Sube al servidor el tablero que antes se guardaba en localStorage, si lo hay. */
+async function migrateLegacyBoard() {
+  try {
+    const raw = window.localStorage.getItem(LEGACY_STORAGE_KEY);
+    if (!raw) return;
+    const legacy: unknown = JSON.parse(raw);
+    if (isBoardState(legacy) && legacy.tasks.length > 0 && state.tasks.length === 0) {
+      await dispatch({ type: "replace", state: legacy });
+    }
+    window.localStorage.removeItem(LEGACY_STORAGE_KEY);
+  } catch {
+    // almacenamiento no disponible o datos corruptos: no hay nada que migrar
+  }
+}
+
+function start() {
+  if (started) return;
+  started = true;
+  fetchBoard().then(migrateLegacyBoard);
+  setInterval(fetchBoard, POLL_MS);
 }
 
 function getSnapshot(): BoardState {
-  if (!state) state = load();
   return state;
 }
 
@@ -40,72 +61,59 @@ function getServerSnapshot(): BoardState {
 }
 
 function subscribe(listener: () => void) {
+  start();
   listeners.add(listener);
   return () => listeners.delete(listener);
 }
 
-function update(updater: (prev: BoardState) => BoardState) {
-  state = updater(getSnapshot());
+async function dispatch(action: BoardAction) {
+  setState(applyAction(state, action));
+  pending++;
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    const res = await fetch(API, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(action),
+    });
+    const board: unknown = await res.json();
+    if (pending === 1 && isBoardState(board)) setState(board);
   } catch {
-    // ignoramos errores de escritura
+    // si falla, la siguiente consulta restaurará el estado del servidor
+  } finally {
+    pending--;
   }
-  listeners.forEach((l) => l());
 }
 
 const newId = () => crypto.randomUUID();
 
 export const actions = {
   addStatus(name: string, color: string) {
-    update((s) => ({
-      ...s,
-      statuses: [...s.statuses, { id: newId(), name, color }],
-    }));
+    dispatch({ type: "addStatus", status: { id: newId(), name, color } });
   },
 
   updateStatus(id: string, changes: Partial<Omit<Status, "id">>) {
-    update((s) => ({
-      ...s,
-      statuses: s.statuses.map((st) => (st.id === id ? { ...st, ...changes } : st)),
-    }));
+    dispatch({ type: "updateStatus", id, changes });
   },
 
   /** Elimina un estado y mueve sus tareas a `moveTasksTo`. */
   deleteStatus(id: string, moveTasksTo: string) {
-    update((s) => ({
-      statuses: s.statuses.filter((st) => st.id !== id),
-      tasks: s.tasks.map((t) => (t.statusId === id ? { ...t, statusId: moveTasksTo } : t)),
-    }));
+    dispatch({ type: "deleteStatus", id, moveTasksTo });
   },
 
   moveStatus(id: string, direction: -1 | 1) {
-    update((s) => {
-      const idx = s.statuses.findIndex((st) => st.id === id);
-      const target = idx + direction;
-      if (idx < 0 || target < 0 || target >= s.statuses.length) return s;
-      const statuses = [...s.statuses];
-      [statuses[idx], statuses[target]] = [statuses[target], statuses[idx]];
-      return { ...s, statuses };
-    });
+    dispatch({ type: "moveStatus", id, direction });
   },
 
   addTask(data: Pick<Task, "title" | "description" | "statusId">) {
-    update((s) => ({
-      ...s,
-      tasks: [...s.tasks, { ...data, id: newId(), createdAt: Date.now() }],
-    }));
+    dispatch({ type: "addTask", task: { ...data, id: newId(), createdAt: Date.now() } });
   },
 
   updateTask(id: string, changes: Partial<Omit<Task, "id" | "createdAt">>) {
-    update((s) => ({
-      ...s,
-      tasks: s.tasks.map((t) => (t.id === id ? { ...t, ...changes } : t)),
-    }));
+    dispatch({ type: "updateTask", id, changes });
   },
 
   deleteTask(id: string) {
-    update((s) => ({ ...s, tasks: s.tasks.filter((t) => t.id !== id) }));
+    dispatch({ type: "deleteTask", id });
   },
 };
 
