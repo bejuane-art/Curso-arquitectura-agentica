@@ -10,12 +10,17 @@ import { z } from "zod";
 import { mutateBoard, readBoard } from "../src/lib/board-file";
 import type { BoardState, Status, Task } from "../src/lib/types";
 
-process.env.KANBAN_DATA_FILE ??= path.join(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "data",
-  "board.json",
-);
+const rootDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+// Next carga .env.local por su cuenta; aquí lo leemos para compartir la
+// configuración del webhook (KANBAN_WEBHOOK_URL / KANBAN_WEBHOOK_SECRET).
+try {
+  process.loadEnvFile(path.join(rootDir, ".env.local"));
+} catch {
+  // no hay .env.local: el webhook queda desactivado salvo que venga del entorno
+}
+
+process.env.KANBAN_DATA_FILE ??= path.join(rootDir, "data", "board.json");
 
 const server = new McpServer({ name: "kanban", version: "0.1.0" });
 

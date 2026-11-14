@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { applyAction, DEFAULT_STATE, isBoardState, type BoardAction } from "./board-ops";
 import type { BoardState } from "./types";
+import { notifyTaskMoves } from "./webhook";
 
 const dataFile = () =>
   process.env.KANBAN_DATA_FILE ?? path.join(process.cwd(), "data", "board.json");
@@ -31,8 +32,11 @@ let queue: Promise<unknown> = Promise.resolve();
 
 export function mutateBoard(action: BoardAction): Promise<BoardState> {
   const run = async () => {
-    const next = applyAction(await readBoard(), action);
+    const prev = await readBoard();
+    const next = applyAction(prev, action);
     await writeBoard(next);
+    // sin await: la respuesta no espera al webhook
+    void notifyTaskMoves(prev, next);
     return next;
   };
   const result = queue.then(run, run);
