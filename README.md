@@ -1,3 +1,9 @@
+<!--
+  Tablero kanban del curso de arquitectura agéntica.
+  - App Next.js en `src/`; servidor MCP para gestionar tickets en `mcp/`.
+  - Reglas de validación para desarrollo en `CLAUDE.md`.
+-->
+
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
 ## Getting Started
